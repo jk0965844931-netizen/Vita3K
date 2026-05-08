@@ -42,18 +42,19 @@ jobs:
         with:
           path: |
             ~/Library/Caches/Homebrew
-            /opt/homebrew/Cellar/cmake
-            /opt/homebrew/Cellar/ninja
+            /opt/homebrew/Cellar/boost
             /opt/homebrew/Cellar/ldid
-          key: homebrew-${{ runner.os }}-${{ hashFiles('.github/workflows/build-ios.yml') }}
+          key: homebrew-${{ runner.os }}-boost-ldid-v1
           restore-keys: |
-            homebrew-${{ runner.os }}-
+            homebrew-${{ runner.os }}-boost-ldid-
 
       # ─── 4. Install dependencies ───────────────────────────────────
+      #        FIX: ติดตั้ง Boost ผ่าน Homebrew แทนการ compile จาก source
+      #        เพราะ b2 build system ของ Boost ไม่รองรับ iOS cross-compile
       - name: Install dependencies
         run: |
-          brew update
-          brew install cmake ninja ldid || true
+          brew install boost ldid || true
+          echo "Boost prefix: $(brew --prefix boost)"
 
       # ─── 5. Cache CMake build ──────────────────────────────────────
       - name: Cache CMake build directory
@@ -65,8 +66,12 @@ jobs:
             cmake-ios-${{ runner.os }}-
 
       # ─── 6. Configure with CMake (iOS cross-compile) ───────────────
+      #        FIX: เพิ่ม VITA3K_FORCE_SYSTEM_BOOST=ON และ Boost_ROOT
       - name: Configure CMake for iOS
         run: |
+          BOOST_ROOT="$(brew --prefix boost)"
+          echo "Using Boost from: $BOOST_ROOT"
+
           cmake \
             -G "Xcode" \
             -B build/ios-xcode \
@@ -77,7 +82,10 @@ jobs:
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
             -DCMAKE_BUILD_TYPE=Release \
-            -DVITA3K_ENABLE_JIT=ON \
+            -DVITA3K_FORCE_SYSTEM_BOOST=ON \
+            -DBoost_ROOT="$BOOST_ROOT" \
+            -DBOOST_ROOT="$BOOST_ROOT" \
+            -DBoost_NO_SYSTEM_PATHS=OFF \
             .
 
       # ─── 7. Build ──────────────────────────────────────────────────
@@ -85,7 +93,6 @@ jobs:
         run: |
           cmake --build build/ios-xcode \
             --config Release \
-            --target vita3k \
             -- \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -96,8 +103,16 @@ jobs:
       - name: Locate .app bundle
         id: locate_app
         run: |
-          APP_PATH=$(find build/ios-xcode -name "*.app" -type d | head -1)
+          APP_PATH=$(find build/ios-xcode -name "*.app" -path "*/Release-iphoneos/*" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find build/ios-xcode -name "*.app" -type d | grep -v ".dSYM" | head -1)
+          fi
           echo "Found app: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: ไม่พบ .app bundle"
+            find build/ios-xcode -name "*.app" -type d
+            exit 1
+          fi
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
 
       # ─── 9. Inject JIT entitlements with ldid ──────────────────────
@@ -113,22 +128,16 @@ jobs:
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <!-- อนุญาต JIT compilation -->
             <key>dynamic-codesigning</key>
             <true/>
-            <!-- สำหรับ AltStore / SideStore JIT -->
             <key>get-task-allow</key>
             <true/>
-            <!-- MAP_JIT memory mapping -->
             <key>com.apple.security.cs.allow-jit</key>
             <true/>
-            <!-- Allow unsigned executable memory (Unicorn CPU emulation) -->
             <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
             <true/>
-            <!-- Disable library validation -->
             <key>com.apple.security.cs.disable-library-validation</key>
             <true/>
-            <!-- App sandbox -->
             <key>com.apple.security.app-sandbox</key>
             <false/>
           </dict>
@@ -137,7 +146,7 @@ jobs:
 
           echo "Injecting entitlements into: $BINARY"
           ldid -S/tmp/vita3k_entitlements.xml "$BINARY"
-          echo "Entitlements injected successfully"
+          echo "Done"
 
       # ─── 10. Package as .ipa ───────────────────────────────────────
       - name: Package .ipa
@@ -150,22 +159,16 @@ jobs:
 
           mkdir -p "$APP_DIR/Payload"
           cp -R "$APP_PATH" "$APP_DIR/Payload/"
-
           cd "$APP_DIR"
           zip -qr "$IPA_PATH" Payload/
           rm -rf Payload/
 
-          echo "IPA created: $IPA_PATH"
+          echo "IPA created: $IPA_PATH ($(du -sh "$IPA_PATH" | cut -f1))"
+          echo "SHA256: $(shasum -a 256 "$IPA_PATH" | cut -d' ' -f1)"
           echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
           echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
 
-          # แสดง checksum
-          echo "### IPA Info" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **File**: \`$IPA_NAME\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Size**: $(du -sh "$IPA_PATH" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **SHA256**: $(shasum -a 256 "$IPA_PATH" | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
-
-      # ─── 11. Upload artifact (เก็บไว้ใน Actions) ───────────────────
+      # ─── 11. Upload artifact ───────────────────────────────────────
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
@@ -185,7 +188,6 @@ jobs:
             TAG="build-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $TAG"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -195,29 +197,14 @@ jobs:
           body: |
             ## 🎮 Vita3K iOS Port — Auto Build
 
-            ### การติดตั้ง
-            ดาวน์โหลด `.ipa` แล้วติดตั้งด้วยวิธีใดวิธีหนึ่ง:
+            | วิธีติดตั้ง | JIT | หมายเหตุ |
+            |------------|-----|---------|
+            | **TrollStore** | ✅ อัตโนมัติ | iOS 14–17 บาง version เท่านั้น |
+            | **AltStore / SideStore** | ✅ ต้องเปิดเอง | ต้องมี AltServer/SideServer |
+            | **Sideloadly** | ⚠️ ไม่มี JIT | รันได้แต่ช้า |
 
-            | วิธี | JIT | หมายเหตุ |
-            |------|-----|---------|
-            | **TrollStore** | ✅ ทำงานอัตโนมัติ | iOS 14–17 บาง version เท่านั้น |
-            | **AltStore / SideStore** | ✅ ต้องเปิด JIT ด้วยตนเอง | ต้องมี AltServer/SideServer |
-            | **Sideloadly** | ⚠️ ไม่มี JIT | รันได้แต่ emulation ช้า |
-
-            ### JIT Entitlements ที่ใส่ไว้
-            - `dynamic-codesigning` — JIT memory mapping
-            - `get-task-allow` — AltJIT / StikJIT compatibility
-            - `com.apple.security.cs.allow-jit` — MAP_JIT support
-            - `com.apple.security.cs.allow-unsigned-executable-memory` — Unicorn CPU
-
-            ### Build Info
-            - **Commit**: `${{ github.sha }}`
-            - **Branch**: `${{ github.ref_name }}`
-            - **Build date**: ${{ github.run_started_at }}
-            - **Runner**: macOS 15 + Xcode 16.2
-
-            ---
-            > ⚠️ **หมายเหตุ**: IPA นี้เป็น unsigned build ต้องใช้ TrollStore หรือ sideload เท่านั้น
+            **Commit**: `${{ github.sha }}`
+            **Build date**: ${{ github.run_started_at }}
           files: ${{ steps.package_ipa.outputs.ipa_path }}
           draft: false
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
