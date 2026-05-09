@@ -2,255 +2,77 @@ name: Build Vita3K iOS IPA
 
 on:
   push:
-    branches:
-      - native-ios-port
-    tags:
-      - 'v*'
+    branches: [ native-ios-port ]
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Tag สำหรับ release (เช่น v1.0.0)'
-        required: false
-        default: ''
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build-ios:
-    name: Build iOS IPA
     runs-on: macos-15
+    timeout-minutes: 120
 
     steps:
-      # ─── 1. Checkout ───────────────────────────────────────────────
-      - name: Checkout (with submodules)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: native-ios-port
           submodules: recursive
           fetch-depth: 0
 
-      # ─── 2. Setup Xcode ────────────────────────────────────────────
-      - name: Select Xcode 16
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '16.2'
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
 
-      # ─── 3. Install tools (ldid เท่านั้น — ไม่ต้องการ Homebrew Boost) ──
-      - name: Install tools
-        run: brew install ldid || true
-
-      # ─── 4. Cache: Boost ที่ compile สำหรับ iOS แล้ว ───────────────
-      - name: Cache Boost iOS
-        id: cache-boost-ios
-        uses: actions/cache@v4
-        with:
-          path: /tmp/boost-ios
-          key: boost-ios-arm64-${{ hashFiles('external/boost/**') }}-v2
-          restore-keys: |
-            boost-ios-arm64-
-
-      # ─── 5. Compile Boost สำหรับ iOS arm64 ────────────────────────
-      #        FIX ROOT CAUSE: Homebrew Boost เป็น macOS binary ใช้ไม่ได้
-      #        ต้อง cross-compile Boost ด้วย iOS SDK เอง
-      - name: Compile Boost for iOS arm64
-        if: steps.cache-boost-ios.outputs.cache-hit != 'true'
+      - name: Install dependencies via Homebrew
         run: |
-          set -e
-          BOOST_SRC="$GITHUB_WORKSPACE/external/boost"
-          BOOST_IOS_PREFIX="/tmp/boost-ios"
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "iOS SDK: $IOS_SDK"
-          echo "Boost source: $BOOST_SRC"
+          brew install cmake ninja openssl molten-vk boost
 
-          cd "$BOOST_SRC"
+      - name: Fix submodule permissions
+        run: |
+          find external -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
-          # Bootstrap b2 (native macOS สำหรับรัน build tool)
-          ./bootstrap.sh --prefix="$BOOST_IOS_PREFIX" 2>&1 | tail -5
-
-          # Compile Boost libraries ด้วย iOS arm64 flags
-          ./b2 \
-            toolset=clang \
-            target-os=iphone \
-            architecture=arm \
-            address-model=64 \
-            cxxflags="-arch arm64 -isysroot $IOS_SDK -mios-version-min=16.0 -fembed-bitcode" \
-            cflags="-arch arm64 -isysroot $IOS_SDK -mios-version-min=16.0 -fembed-bitcode" \
-            linkflags="-arch arm64 -isysroot $IOS_SDK" \
-            --with-filesystem \
-            --with-system \
-            --with-atomic \
-            --with-thread \
-            --with-date_time \
-            --with-serialization \
-            link=static \
-            runtime-link=static \
-            variant=release \
-            threading=multi \
-            --prefix="$BOOST_IOS_PREFIX" \
-            -j$(sysctl -n hw.logicalcpu) \
-            install 2>&1
-          
-          echo "Boost iOS compiled successfully"
-          ls "$BOOST_IOS_PREFIX/lib/"
-
-      # ─── 6. Cache: CMake build ─────────────────────────────────────
-      - name: Cache CMake build
-        uses: actions/cache@v4
-        with:
-          path: build/ios-xcode
-          key: cmake-ios-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-v2
-          restore-keys: |
-            cmake-ios-${{ runner.os }}-
-
-      # ─── 7. Configure CMake (iOS cross-compile) ────────────────────
-      #        FIX: ใช้ Boost ที่ compile สำหรับ iOS + policy OLD สำหรับ FindBoost
       - name: Configure CMake for iOS
         run: |
-          set -e
-          BOOST_IOS="/tmp/boost-ios"
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
-          echo "Boost include: $BOOST_IOS/include"
-          echo "Boost libs:"
-          ls "$BOOST_IOS/lib/" | grep boost
-
-          cmake \
-            -G "Xcode" \
-            -B build/ios-xcode \
+          cmake -B build/ios \
+            -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
-            -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
-            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DVITA3K_FORCE_SYSTEM_BOOST=ON \
-            -DCMAKE_POLICY_DEFAULT_CMP0167=OLD \
-            -DBoost_NO_SYSTEM_PATHS=ON \
-            -DBoost_NO_BOOST_CMAKE=ON \
-            -DBOOST_ROOT="$BOOST_IOS" \
-            -DBoost_INCLUDE_DIR="$BOOST_IOS/include" \
-            -DBoost_FILESYSTEM_LIBRARY_RELEASE="$BOOST_IOS/lib/libboost_filesystem.a" \
-            -DBoost_SYSTEM_LIBRARY_RELEASE="$BOOST_IOS/lib/libboost_system.a" \
-            -DBoost_THREAD_LIBRARY_RELEASE="$BOOST_IOS/lib/libboost_thread.a" \
-            -DBoost_DATE_TIME_LIBRARY_RELEASE="$BOOST_IOS/lib/libboost_date_time.a" \
-            -DBoost_ATOMIC_LIBRARY_RELEASE="$BOOST_IOS/lib/libboost_atomic.a" \
-            -DBoost_SERIALIZATION_LIBRARY_RELEASE="$BOOST_IOS/lib/libboost_serialization.a" \
-            .
+            -DVITA3K_BUILD_QT_UI=OFF \
+            -DUSE_DISCORD_RICH_PRESENCE=OFF
 
-      # ─── 8. Build ──────────────────────────────────────────────────
-      - name: Build Vita3K (Release)
+      - name: Build for iOS (Release)
         run: |
-          cmake --build build/ios-xcode \
+          cmake --build build/ios \
             --config Release \
+            --target vita3k \
             -- \
-            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            -jobs $(sysctl -n hw.logicalcpu)
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO
 
-      # ─── 9. Find .app bundle ───────────────────────────────────────
-      - name: Locate .app bundle
-        id: locate_app
+      - name: Find .app bundle
+        id: find_app
         run: |
-          APP_PATH=$(find build/ios-xcode -name "*.app" -path "*/Release-iphoneos/*" -type d | head -1)
-          if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find build/ios-xcode -name "*.app" -type d | grep -v ".dSYM" | head -1)
-          fi
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: ไม่พบ .app bundle"
-            find build/ios-xcode -name "*.app"
-            exit 1
-          fi
+          APP_PATH=$(find build/ios -name "*.app" -maxdepth 5 | head -1)
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
           echo "Found: $APP_PATH"
-          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
 
-      # ─── 10. Inject JIT entitlements ──────────────────────────────
-      - name: Inject JIT entitlements
+      - name: Package .app into .ipa
         run: |
-          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
-          BINARY="$APP_PATH/$(basename "$APP_PATH" .app)"
+          APP_PATH="${{ steps.find_app.outputs.app_path }}"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r Vita3K.ipa Payload
+          echo "IPA created: $(ls -lh Vita3K.ipa)"
 
-          cat > /tmp/ent.xml << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>dynamic-codesigning</key><true/>
-            <key>get-task-allow</key><true/>
-            <key>com.apple.security.cs.allow-jit</key><true/>
-            <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
-            <key>com.apple.security.cs.disable-library-validation</key><true/>
-            <key>com.apple.security.app-sandbox</key><false/>
-          </dict>
-          </plist>
-          EOF
-
-          ldid -S/tmp/ent.xml "$BINARY"
-          echo "Entitlements injected: $BINARY"
-
-      # ─── 11. Package .ipa ──────────────────────────────────────────
-      - name: Package .ipa
-        id: package_ipa
-        run: |
-          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
-          APP_DIR=$(dirname "$APP_PATH")
-          IPA_NAME="Vita3K-iOS-$(date +'%Y%m%d')-$(git rev-parse --short HEAD).ipa"
-          IPA_PATH="$GITHUB_WORKSPACE/$IPA_NAME"
-
-          mkdir -p "$APP_DIR/Payload"
-          cp -R "$APP_PATH" "$APP_DIR/Payload/"
-          (cd "$APP_DIR" && zip -qr "$IPA_PATH" Payload/)
-          rm -rf "$APP_DIR/Payload"
-
-          SIZE=$(du -sh "$IPA_PATH" | cut -f1)
-          SHA=$(shasum -a 256 "$IPA_PATH" | cut -d' ' -f1)
-          echo "IPA: $IPA_NAME ($SIZE) SHA256=$SHA"
-          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
-          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
-
-      # ─── 12. Upload artifact ───────────────────────────────────────
-      - name: Upload IPA artifact
+      - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Vita3K-iOS-IPA
-          path: ${{ steps.package_ipa.outputs.ipa_path }}
-          retention-days: 14
-
-      # ─── 13. GitHub Release ────────────────────────────────────────
-      - name: Determine release tag
-        id: release_tag
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG="${{ github.ref_name }}"
-          elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
-            TAG="${{ github.event.inputs.release_tag }}"
-          else
-            TAG="build-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.release_tag.outputs.tag }}
-          name: "Vita3K iOS — ${{ steps.release_tag.outputs.tag }}"
-          body: |
-            ## 🎮 Vita3K iOS Port — Auto Build
-
-            | วิธีติดตั้ง | JIT | หมายเหตุ |
-            |------------|-----|---------|
-            | **TrollStore** | ✅ อัตโนมัติ | iOS 14–17 บาง version |
-            | **AltStore / SideStore** | ✅ ต้องเปิดเอง | ต้องมี AltServer |
-            | **Sideloadly** | ⚠️ ไม่มี JIT | รันได้แต่ช้า |
-
-            **Commit**: `${{ github.sha }}`
-            **Build**: macOS 15 + Xcode 16.2 + Boost iOS arm64
-          files: ${{ steps.package_ipa.outputs.ipa_path }}
-          draft: false
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: Vita3K-iOS-unsigned
+          path: Vita3K.ipa
+          retention-days: 30
