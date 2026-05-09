@@ -29,8 +29,16 @@ jobs:
         run: |
           find external -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
+      - name: Get Boost path
+        id: boost
+        run: |
+          BOOST_ROOT=$(brew --prefix boost)
+          echo "root=$BOOST_ROOT" >> $GITHUB_OUTPUT
+          echo "Boost at: $BOOST_ROOT"
+
       - name: Configure CMake for iOS
         run: |
+          BOOST_ROOT="${{ steps.boost.outputs.root }}"
           cmake -B build/ios \
             -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -42,7 +50,14 @@ jobs:
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DVITA3K_FORCE_SYSTEM_BOOST=ON \
             -DVITA3K_BUILD_QT_UI=OFF \
-            -DUSE_DISCORD_RICH_PRESENCE=OFF
+            -DUSE_DISCORD_RICH_PRESENCE=OFF \
+            -DBOOST_ROOT="$BOOST_ROOT" \
+            -DBoost_ROOT="$BOOST_ROOT" \
+            -DBoost_INCLUDE_DIR="$BOOST_ROOT/include" \
+            -DBoost_LIBRARY_DIR_RELEASE="$BOOST_ROOT/lib" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DBoost_NO_BOOST_CMAKE=ON \
+            -Wno-dev
 
       - name: Build for iOS (Release)
         run: |
@@ -58,7 +73,7 @@ jobs:
       - name: Find .app bundle
         id: find_app
         run: |
-          APP_PATH=$(find build/ios -name "*.app" -maxdepth 5 | head -1)
+          APP_PATH=$(find build/ios -name "*.app" -maxdepth 6 | head -1)
           echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
           echo "Found: $APP_PATH"
 
@@ -68,7 +83,7 @@ jobs:
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r Vita3K.ipa Payload
-          echo "IPA created: $(ls -lh Vita3K.ipa)"
+          echo "IPA size: $(ls -lh Vita3K.ipa)"
 
       - name: Upload IPA as artifact
         uses: actions/upload-artifact@v4
