@@ -1,0 +1,73 @@
+name: Build Vita3K iOS IPA
+
+on:
+  push:
+    branches: [ native-ios-port ]
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: native-ios-port
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install dependencies via Homebrew
+        run: |
+          brew install cmake ninja openssl molten-vk
+
+      - name: Configure CMake for iOS
+        run: |
+          cmake -B build/ios \
+            -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DVITA3K_BUILD_QT_UI=OFF \
+            -DUSE_DISCORD_RICH_PRESENCE=OFF
+
+      - name: Build for iOS (Release)
+        run: |
+          cmake --build build/ios \
+            --config Release \
+            --target vita3k \
+            -- \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: Find .app bundle
+        id: find_app
+        run: |
+          APP_PATH=$(find build/ios -name "*.app" -maxdepth 5 | head -1)
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "Found: $APP_PATH"
+
+      - name: Package .app into .ipa
+        run: |
+          APP_PATH="${{ steps.find_app.outputs.app_path }}"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r Vita3K.ipa Payload
+          echo "IPA created: $(ls -lh Vita3K.ipa)"
+
+      - name: Upload IPA as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vita3K-iOS-unsigned
+          path: Vita3K.ipa
+          retention-days: 30
