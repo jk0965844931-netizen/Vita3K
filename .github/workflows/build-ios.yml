@@ -45,16 +45,20 @@ jobs:
             echo "CPackConfig.txt not found, skipping patch"
           fi
 
-      - name: Get Boost path
-        id: boost
+      - name: Get Boost and OpenSSL paths
+        id: paths
         run: |
           BOOST_ROOT=$(brew --prefix boost)
-          echo "root=$BOOST_ROOT" >> $GITHUB_OUTPUT
+          OPENSSL_ROOT=$(brew --prefix openssl@3)
+          echo "boost_root=$BOOST_ROOT" >> $GITHUB_OUTPUT
+          echo "openssl_root=$OPENSSL_ROOT" >> $GITHUB_OUTPUT
           echo "Boost at: $BOOST_ROOT"
+          echo "OpenSSL at: $OPENSSL_ROOT"
 
       - name: Configure CMake for iOS
         run: |
-          BOOST_ROOT="${{ steps.boost.outputs.root }}"
+          BOOST_ROOT="${{ steps.paths.outputs.boost_root }}"
+          OPENSSL_ROOT="${{ steps.paths.outputs.openssl_root }}"
           cmake -B build/ios \
             -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -77,6 +81,7 @@ jobs:
             -DBoost_LIBRARY_DIR_RELEASE="$BOOST_ROOT/lib" \
             -DBoost_NO_SYSTEM_PATHS=ON \
             -DBoost_NO_BOOST_CMAKE=ON \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT" \
             -Wno-dev
 
       - name: Build for iOS (Release)
